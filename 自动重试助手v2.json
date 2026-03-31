@@ -1,22 +1,280 @@
-{
-  "type": "script",
-  "enabled": true,
-  "name": "自动重试助手 v2",
-  "id": "retry-assist-v2-a1b2c3d4e5f6",
-  "content": "// ==========================================\n// 配置键名与默认值\n// ==========================================\nconst STORAGE_KEY = 'retry_assistant_v2';\nconst DEFAULTS = { maxRetries: 100, minLength: 50, retryDelay: 300, enabled: true, method: 'swipe' };\n\n// ==========================================\n// 读取/保存配置\n// ==========================================\nfunction loadSettings() {\n    try {\n        const saved = localStorage.getItem(STORAGE_KEY);\n        if (saved) {\n            const d = JSON.parse(saved);\n            return {\n                maxRetries: d.maxRetries ?? DEFAULTS.maxRetries,\n                minLength: d.minLength ?? DEFAULTS.minLength,\n                retryDelay: d.retryDelay ?? DEFAULTS.retryDelay,\n                enabled: d.enabled ?? DEFAULTS.enabled,\n                method: d.method ?? DEFAULTS.method,\n            };\n        }\n    } catch (e) { console.error('[RetryAssist] 读取设置失败:', e); }\n    return { ...DEFAULTS };\n}\n\nfunction saveSettings() {\n    try {\n        localStorage.setItem(STORAGE_KEY, JSON.stringify({ maxRetries, minLength, retryDelay, enabled, method }));\n    } catch (e) { console.error('[RetryAssist] 保存设置失败:', e); }\n}\n\n// ==========================================\n// 状态\n// ==========================================\nconst saved = loadSettings();\nlet maxRetries = saved.maxRetries;\nlet minLength = saved.minLength;\nlet retryDelay = saved.retryDelay;\nlet enabled = saved.enabled;\nlet method = saved.method;\nlet retryCount = 0;\nlet gotToken = false;\nlet isRetrying = false;\nlet inRetrySession = false;\nlet userStopped = false;\n\n// ==========================================\n// 工具\n// ==========================================\nfunction delay(ms) { return new Promise(r => setTimeout(r, ms)); }\n\nasync function isGroupChat() {\n    try {\n        const r = await triggerSlash('/pass {{group}}');\n        return r && r.trim().length > 0;\n    } catch { return false; }\n}\n\nasync function safeSwipe() {\n    for (let i = 0; i < 10; i++) {\n        await delay(2000);\n        try {\n            if ($('#send_but').css('display') === 'none') continue;\n            $('.swipe_right:last').trigger('click');\n            return true;\n        } catch {}\n    }\n    return false;\n}\n\n// ==========================================\n// 重试执行\n// ==========================================\nasync function doRetry(msgId) {\n    isRetrying = true;\n    inRetrySession = true;\n    try {\n        await delay(2000);\n\n        if (method === 'swipe') {\n            if (!(await safeSwipe())) { isRetrying = false; inRetrySession = false; }\n\n        } else if (method === 'delete_regen') {\n            if (await isGroupChat()) {\n                const msgs = getChatMessages(msgId);\n                const charName = (msgs.length > 0 && msgs[0].role === 'assistant') ? (msgs[0].name || '') : '';\n                await deleteChatMessages([getLastMessageId()]);\n                await delay(1000);\n                await triggerSlash(charName ? `/trigger ${charName}` : '/trigger');\n            } else {\n                await triggerSlash('/regenerate');\n            }\n        }\n    } catch (e) {\n        console.error('[RetryAssist] 重试失败:', e);\n        isRetrying = false;\n        inRetrySession = false;\n    }\n}\n\n// ==========================================\n// 开关\n// ==========================================\nfunction toggle() {\n    enabled = !enabled;\n    retryCount = 0;\n    inRetrySession = false;\n    saveSettings();\n    const label = method === 'swipe' ? 'Swipe' : '删除重开';\n    if (enabled) {\n        toastr.success(`✅ 已开启 | 重试${maxRetries}次 | 最短${minLength}字 | ${label}`, '自动重试');\n    } else {\n        toastr.info('❌ 已关闭', '自动重试');\n    }\n}\n\n// ==========================================\n// 设置弹窗\n// ==========================================\nasync function openSettings() {\n    let cMax = maxRetries, cMin = minLength, cDelay = retryDelay, cMethod = method;\n\n    const r = await SillyTavern.callGenericPopup(\n        `<div style=\"padding:16px;\">\n            <div style=\"font-size:16px;font-weight:bold;margin-bottom:16px;text-align:center;\">⚙️ 自动重试设置</div>\n            <div style=\"margin-bottom:14px;\">\n                <label style=\"font-size:14px;\">🔢 最大重试次数</label>\n                <input type=\"number\" id=\"ra_max\" value=\"${maxRetries}\" min=\"1\"\n                    style=\"width:100%;padding:8px;margin-top:4px;border:1px solid #555;border-radius:4px;background:#333;color:#fff;\">\n            </div>\n            <div style=\"margin-bottom:14px;\">\n                <label style=\"font-size:14px;\">📏 最小回复长度（字符）</label>\n                <input type=\"number\" id=\"ra_min\" value=\"${minLength}\" min=\"0\"\n                    style=\"width:100%;padding:8px;margin-top:4px;border:1px solid #555;border-radius:4px;background:#333;color:#fff;\">\n                <div style=\"font-size:12px;color:#888;margin-top:2px;\">设为0禁用过短检测</div>\n            </div>\n            <div style=\"margin-bottom:14px;\">\n                <label style=\"font-size:14px;\">⏱️ 重试延迟（毫秒）</label>\n                <input type=\"number\" id=\"ra_delay\" value=\"${retryDelay}\" min=\"0\" step=\"100\"\n                    style=\"width:100%;padding:8px;margin-top:4px;border:1px solid #555;border-radius:4px;background:#333;color:#fff;\">\n            </div>\n            <div style=\"padding:10px;border:1px solid #555;border-radius:6px;background:#2a2a2a;\">\n                <label style=\"font-size:14px;font-weight:bold;\">🔄 重试方式</label>\n                <select id=\"ra_method\"\n                    style=\"width:100%;padding:8px;margin-top:6px;border:1px solid #555;border-radius:4px;background:#333;color:#fff;\">\n                    <option value=\"swipe\" ${method === 'swipe' ? 'selected' : ''}>Swipe（平行分支）</option>\n                    <option value=\"delete_regen\" ${method === 'delete_regen' ? 'selected' : ''}>删除重开</option>\n                </select>\n                <div style=\"font-size:12px;color:#888;margin-top:4px;\">\n                    Swipe：保留历史，占存储<br>\n                    删除重开：单聊=regenerate；群聊=删除+重新触发同一角色\n                </div>\n            </div>\n        </div>`,\n        SillyTavern.POPUP_TYPE.CONFIRM, '',\n        {\n            okButton: '保存', cancelButton: '取消', wide: false,\n            onClosing: async () => {\n                cMax = parseInt($('#ra_max').val(), 10);\n                cMin = parseInt($('#ra_min').val(), 10);\n                cDelay = parseInt($('#ra_delay').val(), 10);\n                cMethod = $('#ra_method').val();\n                return true;\n            },\n        }\n    );\n\n    if (r === SillyTavern.POPUP_RESULT.AFFIRMATIVE) {\n        let ok = false;\n        if (!isNaN(cMax) && cMax >= 1) { maxRetries = cMax; ok = true; }\n        if (!isNaN(cMin) && cMin >= 0) { minLength = cMin; ok = true; }\n        if (!isNaN(cDelay) && cDelay >= 0) { retryDelay = cDelay; ok = true; }\n        if (['swipe', 'delete_regen'].includes(cMethod)) { method = cMethod; ok = true; }\n        if (ok) {\n            retryCount = 0; inRetrySession = false; saveSettings();\n            const label = method === 'swipe' ? 'Swipe' : '删除重开';\n            toastr.success(`✅ ${maxRetries}次 | ${minLength}字 | ${label}`, '设置已保存');\n        }\n    }\n}\n\n// ==========================================\n// 事件监听\n// ==========================================\neventOn(tavern_events.CHAT_CHANGED, () => {\n    if (!inRetrySession) { retryCount = 0; gotToken = false; isRetrying = false; userStopped = false; }\n});\n\neventOn(tavern_events.GENERATION_STARTED, () => {\n    gotToken = false;\n    if (!inRetrySession) retryCount = 0;\n    isRetrying = false;\n});\n\neventOn(tavern_events.STREAM_TOKEN_RECEIVED, () => { gotToken = true; });\n\neventOn(tavern_events.MESSAGE_RECEIVED, (msgId, type) => {\n    gotToken = true;\n    if (type === 'first_message') { retryCount = 0; inRetrySession = false; return; }\n    if (userStopped) { userStopped = false; retryCount = 0; inRetrySession = false; return; }\n    if (!enabled || minLength <= 0 || isRetrying) return;\n\n    const msgs = getChatMessages(msgId);\n    if (msgs.length === 0 || msgs[0].role !== 'assistant') { retryCount = 0; inRetrySession = false; return; }\n\n    const text = msgs[0].message.trim();\n    if (text.length < minLength) {\n        if (retryCount >= maxRetries) {\n            toastr.error(`⚠️ 连续${maxRetries}次过短，已停止`, '自动重试');\n            retryCount = 0; inRetrySession = false;\n            return;\n        }\n        retryCount++;\n        toastr.warning(`🔄 过短 (${text.length}/${minLength}) ${retryCount}/${maxRetries}`, '自动重试');\n        doRetry(msgId);\n        return;\n    }\n    retryCount = 0;\n    inRetrySession = false;\n});\n\neventOn(tavern_events.GENERATION_ENDED, async (msgId) => {\n    if (!enabled || gotToken || isRetrying) return;\n    if (retryCount >= maxRetries) {\n        toastr.error(`⚠️ 连续${maxRetries}次无回复，已停止`, '自动重试');\n        retryCount = 0; inRetrySession = false;\n        return;\n    }\n    retryCount++;\n    inRetrySession = true;\n    toastr.warning(`🔄 无回复 ${retryCount}/${maxRetries}`, '自动重试');\n    isRetrying = true;\n    try {\n        await delay(2000);\n        const last = getChatMessages(-1);\n        if (last.length > 0 && last[0].role === 'assistant' && last[0].name) {\n            await triggerSlash(`/trigger ${last[0].name}`);\n        } else {\n            await triggerSlash('/trigger');\n        }\n    } catch (e) {\n        console.error('[RetryAssist] 断流重试失败:', e);\n        isRetrying = false; inRetrySession = false;\n    }\n});\n\neventOn(tavern_events.GENERATION_STOPPED, () => {\n    if (!inRetrySession) { gotToken = true; retryCount = 0; userStopped = true; }\n});\n\n// ==========================================\n// 按钮\n// ==========================================\nreplaceScriptButtons([\n    { name: '🔄 开关', visible: true },\n    { name: '⚙️ 设置', visible: true },\n]);\neventOn(getButtonEvent('🔄 开关'), toggle);\neventOn(getButtonEvent('⚙️ 设置'), openSettings);",
-  "info": "自动重试过短/空回复，支持 Swipe 和删除重开两种模式，兼容单聊和群聊。\n灵感来源于 a.beniuk 的「请求失败重试」脚本。",
-  "button": {
-    "enabled": true,
-    "buttons": [
-      {
-        "name": "🔄 开关",
-        "visible": true
-      },
-      {
-        "name": "⚙️ 设置",
-        "visible": true
-      }
-    ]
-  },
-  "data": {}
+// ==========================================
+// 配置键名与默认值
+// ==========================================
+const STORAGE_KEY = 'retry_assistant_v2';
+const DEFAULTS = { maxRetries: 100, minLength: 50, retryDelay: 300, enabled: true, method: 'swipe' };
+
+// ==========================================
+// 读取/保存配置
+// ==========================================
+function loadSettings() {
+    try {
+        const saved = localStorage.getItem(STORAGE_KEY);
+        if (saved) {
+            const d = JSON.parse(saved);
+            return {
+                maxRetries: d.maxRetries ?? DEFAULTS.maxRetries,
+                minLength: d.minLength ?? DEFAULTS.minLength,
+                retryDelay: d.retryDelay ?? DEFAULTS.retryDelay,
+                enabled: d.enabled ?? DEFAULTS.enabled,
+                method: d.method ?? DEFAULTS.method,
+            };
+        }
+    } catch (e) { console.error('[RetryAssist] 读取设置失败:', e); }
+    return { ...DEFAULTS };
 }
+
+function saveSettings() {
+    try {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify({ maxRetries, minLength, retryDelay, enabled, method }));
+    } catch (e) { console.error('[RetryAssist] 保存设置失败:', e); }
+}
+
+// ==========================================
+// 状态
+// ==========================================
+const saved = loadSettings();
+let maxRetries = saved.maxRetries;
+let minLength = saved.minLength;
+let retryDelay = saved.retryDelay;
+let enabled = saved.enabled;
+let method = saved.method;
+let retryCount = 0;
+let gotToken = false;
+let isRetrying = false;
+let inRetrySession = false;
+let userStopped = false;
+let abortRequested = false;
+
+// ==========================================
+// 工具
+// ==========================================
+function delay(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+async function isGroupChat() {
+    try {
+        const r = await triggerSlash('/pass {{group}}');
+        return r && r.trim().length > 0;
+    } catch { return false; }
+}
+
+function resetRetryState() {
+    isRetrying = false;
+    inRetrySession = false;
+    retryCount = 0;
+    abortRequested = false;
+}
+
+async function safeSwipe() {
+    for (let i = 0; i < 10; i++) {
+        await delay(2000);
+        if (abortRequested) return false;
+        try {
+            if ($('#send_but').css('display') === 'none') continue;
+            $('.swipe_right:last').trigger('click');
+            return true;
+        } catch {}
+    }
+    return false;
+}
+
+// ==========================================
+// 重试执行
+// ==========================================
+async function doRetry(msgId) {
+    isRetrying = true;
+    inRetrySession = true;
+    abortRequested = false;
+    try {
+        await delay(2000);
+        if (abortRequested) { resetRetryState(); return; }
+
+        if (method === 'swipe') {
+            if (!(await safeSwipe())) { resetRetryState(); }
+
+        } else if (method === 'delete_regen') {
+            if (abortRequested) { resetRetryState(); return; }
+
+            if (await isGroupChat()) {
+                const msgs = getChatMessages(msgId);
+                const charName = (msgs.length > 0 && msgs[0].role === 'assistant') ? (msgs[0].name || '') : '';
+                await deleteChatMessages([getLastMessageId()]);
+                await delay(1000);
+                if (abortRequested) { resetRetryState(); return; }
+                await triggerSlash(charName ? `/trigger ${charName}` : '/trigger');
+            } else {
+                await triggerSlash('/regenerate');
+            }
+        }
+    } catch (e) {
+        console.error('[RetryAssist] 重试失败:', e);
+        resetRetryState();
+    }
+}
+
+// ==========================================
+// 开关
+// ==========================================
+function toggle() {
+    enabled = !enabled;
+    resetRetryState();
+    saveSettings();
+    const label = method === 'swipe' ? 'Swipe' : '删除重开';
+    if (enabled) {
+        toastr.success(`✅ 已开启 | 重试${maxRetries}次 | 最短${minLength}字 | ${label}`, '自动重试');
+    } else {
+        toastr.info('❌ 已关闭', '自动重试');
+    }
+}
+
+// ==========================================
+// 设置弹窗
+// ==========================================
+async function openSettings() {
+    let cMax = maxRetries, cMin = minLength, cDelay = retryDelay, cMethod = method;
+
+    const r = await SillyTavern.callGenericPopup(
+        `<div style="padding:16px;">
+            <div style="font-size:16px;font-weight:bold;margin-bottom:16px;text-align:center;">⚙️ 自动重试设置</div>
+            <div style="margin-bottom:14px;">
+                <label style="font-size:14px;">🔢 最大重试次数</label>
+                <input type="number" id="ra_max" value="${maxRetries}" min="1"
+                    style="width:100%;padding:8px;margin-top:4px;border:1px solid #555;border-radius:4px;background:#333;color:#fff;">
+            </div>
+            <div style="margin-bottom:14px;">
+                <label style="font-size:14px;">📏 最小回复长度（字符）</label>
+                <input type="number" id="ra_min" value="${minLength}" min="0"
+                    style="width:100%;padding:8px;margin-top:4px;border:1px solid #555;border-radius:4px;background:#333;color:#fff;">
+                <div style="font-size:12px;color:#888;margin-top:2px;">设为0禁用过短检测</div>
+            </div>
+            <div style="margin-bottom:14px;">
+                <label style="font-size:14px;">⏱️ 重试延迟（毫秒）</label>
+                <input type="number" id="ra_delay" value="${retryDelay}" min="0" step="100"
+                    style="width:100%;padding:8px;margin-top:4px;border:1px solid #555;border-radius:4px;background:#333;color:#fff;">
+            </div>
+            <div style="padding:10px;border:1px solid #555;border-radius:6px;background:#2a2a2a;">
+                <label style="font-size:14px;font-weight:bold;">🔄 重试方式</label>
+                <select id="ra_method"
+                    style="width:100%;padding:8px;margin-top:6px;border:1px solid #555;border-radius:4px;background:#333;color:#fff;">
+                    <option value="swipe" ${method === 'swipe' ? 'selected' : ''}>Swipe（平行分支）</option>
+                    <option value="delete_regen" ${method === 'delete_regen' ? 'selected' : ''}>删除重开</option>
+                </select>
+                <div style="font-size:12px;color:#888;margin-top:4px;">
+                    Swipe：保留历史，占存储<br>
+                    删除重开：单聊=regenerate；群聊=删除+重新触发同一角色
+                </div>
+            </div>
+        </div>`,
+        SillyTavern.POPUP_TYPE.CONFIRM, '',
+        {
+            okButton: '保存', cancelButton: '取消', wide: false,
+            onClosing: async () => {
+                cMax = parseInt($('#ra_max').val(), 10);
+                cMin = parseInt($('#ra_min').val(), 10);
+                cDelay = parseInt($('#ra_delay').val(), 10);
+                cMethod = $('#ra_method').val();
+                return true;
+            },
+        }
+    );
+
+    if (r === SillyTavern.POPUP_RESULT.AFFIRMATIVE) {
+        let ok = false;
+        if (!isNaN(cMax) && cMax >= 1) { maxRetries = cMax; ok = true; }
+        if (!isNaN(cMin) && cMin >= 0) { minLength = cMin; ok = true; }
+        if (!isNaN(cDelay) && cDelay >= 0) { retryDelay = cDelay; ok = true; }
+        if (['swipe', 'delete_regen'].includes(cMethod)) { method = cMethod; ok = true; }
+        if (ok) {
+            resetRetryState();
+            saveSettings();
+            const label = method === 'swipe' ? 'Swipe' : '删除重开';
+            toastr.success(`✅ ${maxRetries}次 | ${minLength}字 | ${label}`, '设置已保存');
+        }
+    }
+}
+
+// ==========================================
+// 事件监听
+// ==========================================
+eventOn(tavern_events.CHAT_CHANGED, () => {
+    if (!inRetrySession) { retryCount = 0; gotToken = false; isRetrying = false; userStopped = false; abortRequested = false; }
+});
+
+eventOn(tavern_events.GENERATION_STARTED, () => {
+    gotToken = false;
+    if (!inRetrySession) retryCount = 0;
+    isRetrying = false;
+});
+
+eventOn(tavern_events.STREAM_TOKEN_RECEIVED, () => { gotToken = true; });
+
+eventOn(tavern_events.MESSAGE_RECEIVED, (msgId, type) => {
+    gotToken = true;
+    if (type === 'first_message') { resetRetryState(); return; }
+    if (userStopped) { userStopped = false; resetRetryState(); return; }
+    if (!enabled || minLength <= 0 || isRetrying) return;
+
+    const msgs = getChatMessages(msgId);
+    if (msgs.length === 0 || msgs[0].role !== 'assistant') { resetRetryState(); return; }
+
+    const text = msgs[0].message.trim();
+    if (text.length < minLength) {
+        if (retryCount >= maxRetries) {
+            toastr.error(`⚠️ 连续${maxRetries}次过短，已停止`, '自动重试');
+            resetRetryState();
+            return;
+        }
+        retryCount++;
+        toastr.warning(`🔄 过短 (${text.length}/${minLength}) ${retryCount}/${maxRetries}`, '自动重试');
+        doRetry(msgId);
+        return;
+    }
+    resetRetryState();
+});
+
+eventOn(tavern_events.GENERATION_ENDED, async (msgId) => {
+    if (!enabled || gotToken || isRetrying) return;
+    if (retryCount >= maxRetries) {
+        toastr.error(`⚠️ 连续${maxRetries}次无回复，已停止`, '自动重试');
+        resetRetryState();
+        return;
+    }
+    retryCount++;
+    inRetrySession = true;
+    toastr.warning(`🔄 无回复 ${retryCount}/${maxRetries}`, '自动重试');
+    isRetrying = true;
+    try {
+        await delay(2000);
+        if (abortRequested) { resetRetryState(); return; }
+        const last = getChatMessages(-1);
+        if (last.length > 0 && last[0].role === 'assistant' && last[0].name) {
+            await triggerSlash(`/trigger ${last[0].name}`);
+        } else {
+            await triggerSlash('/trigger');
+        }
+    } catch (e) {
+        console.error('[RetryAssist] 断流重试失败:', e);
+        resetRetryState();
+    }
+});
+
+// ★ 用户按暂停：无条件设 abortRequested，让 safeSwipe/doRetry 中断
+eventOn(tavern_events.GENERATION_STOPPED, () => {
+    if (inRetrySession) {
+        abortRequested = true;
+    } else {
+        gotToken = true;
+        retryCount = 0;
+        userStopped = true;
+    }
+});
+
+// ==========================================
+// 按钮
+// ==========================================
+replaceScriptButtons([
+    { name: '🔄 开关', visible: true },
+    { name: '⚙️ 设置', visible: true },
+]);
+eventOn(getButtonEvent('🔄 开关'), toggle);
+eventOn(getButtonEvent('⚙️ 设置'), openSettings);
